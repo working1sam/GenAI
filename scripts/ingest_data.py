@@ -5,6 +5,11 @@ from app.db import Base, SessionLocal, engine
 from app.models import DocumentChunk
 from app.rag import RAGService
 
+try:
+    from PyPDF2 import PdfReader
+except Exception:
+    PdfReader = None
+
 
 def split_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
     chunks = []
@@ -31,11 +36,36 @@ def ingest_directory(data_dir: Path):
         files = [
             p
             for p in data_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in {".txt", ".md", ".csv", ".json"}
+            if p.is_file() and p.suffix.lower() in {".txt", ".md", ".csv", ".json", ".pdf"}
         ]
 
+        processed = 0
         for file_path in files:
-            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            suffix = file_path.suffix.lower()
+            text = ""
+            if suffix == ".pdf":
+                if PdfReader is None:
+                    print("Skipping PDF ingestion: PyPDF2 is not installed.")
+                    continue
+                try:
+                    reader = PdfReader(str(file_path))
+                    pages = []
+                    for p in reader.pages:
+                        try:
+                            pages.append(p.extract_text() or "")
+                        except Exception:
+                            pages.append("")
+                    text = "\n".join(pages)
+                except Exception as e:
+                    print(f"Failed to read PDF {file_path}: {e}")
+                    continue
+            else:
+                text = file_path.read_text(encoding="utf-8", errors="ignore")
+
+            if not text or not text.strip():
+                # nothing to index for this file
+                continue
+
             for chunk in split_text(text):
                 emb = rag.embed_text(chunk)
                 row = DocumentChunk(
@@ -44,9 +74,10 @@ def ingest_directory(data_dir: Path):
                     embedding_json=json.dumps(emb),
                 )
                 db.add(row)
+            processed += 1
 
         db.commit()
-        print(f"Ingestion complete. Indexed {len(files)} files.")
+        print(f"Ingestion complete. Indexed {processed} files.")
     finally:
         db.close()
 
